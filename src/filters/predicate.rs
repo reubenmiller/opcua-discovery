@@ -60,15 +60,15 @@ impl DataTypeMatcher {
         if self.node_ids.contains(dt) {
             return true;
         }
-        if let Some(uri) = namespaces.uri(dt.namespace) {
-            if self.ns_uris.contains(uri) {
-                return true;
-            }
+        if let Some(uri) = namespaces.uri(dt.namespace)
+            && self.ns_uris.contains(uri)
+        {
+            return true;
         }
-        if let Some(name) = builtin_datatype_name(dt) {
-            if self.names.contains(&name.to_ascii_lowercase()) {
-                return true;
-            }
+        if let Some(name) = builtin_datatype_name(dt)
+            && self.names.contains(&name.to_ascii_lowercase())
+        {
+            return true;
         }
         false
     }
@@ -109,7 +109,7 @@ impl Predicate {
                 None => {
                     return Err(ScanError::InvalidArgument(format!(
                         "namespace URI '{uri}' is not present on the server"
-                    )))
+                    )));
                 }
             }
         }
@@ -140,10 +140,10 @@ impl Predicate {
         attrs: &NodeAttributes,
         namespaces: &NamespaceTable,
     ) -> bool {
-        if let Some(allowed) = &self.ns_indexes {
-            if !allowed.contains(&node_id.namespace) {
-                return false;
-            }
+        if let Some(allowed) = &self.ns_indexes
+            && !allowed.contains(&node_id.namespace)
+        {
+            return false;
         }
 
         if self.has_node_class_filter {

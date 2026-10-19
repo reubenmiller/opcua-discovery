@@ -5,7 +5,7 @@
 //! `-q/--quiet` flags, or overridden entirely by the `RUST_LOG` environment
 //! variable for advanced filtering.
 
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Initialise the global tracing subscriber.
 ///

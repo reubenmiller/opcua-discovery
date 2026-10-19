@@ -1,0 +1,9 @@
+schema: spec-driven
+
+# Project context, shown to AI when creating artifacts.
+context: |
+  opcua-scan: Rust CLI (clap, tokio, async-opcua 0.18, ratatui) that discovers an OPC UA
+  address space. The reverse-engineered whole-repo documentation lives next to this file
+  (spec.md, architecture.md, components/); spec-driven changes live in changes/.
+  Point libraries and connector configs are defined by tedge-dot (~/git/tedge-dot):
+  contract §3.4, doc/connectors/opcua-connector-spec.md.

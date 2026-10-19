@@ -20,7 +20,7 @@ space concurrently and safely, reports nodes with rich metadata, and can stream 
 to machine-readable sinks (including [thin-edge.io](https://thin-edge.io) measurement format).
 
 - **Binary name:** `opcua-scan` **[Confirmed]** (`Cargo.toml` `[[bin]]`).
-- **Crate name:** `opcua-scan`, version `0.1.0`, edition 2021, `rust-version = 1.80`. **[Confirmed]**
+- **Crate name:** `opcua-scan`, version `0.1.0`, edition 2024, `rust-version = 1.88`. **[Confirmed]**
 - **License:** MPL-2.0 **[Confirmed]** (`Cargo.toml`; note `README.md` also states MPL-2.0).
 - **Language/runtime:** Rust, async on Tokio. **[Confirmed]**
 - **Core dependency:** [`async-opcua`](https://github.com/freeopcua/async-opcua) `0.18` (client feature). **[Confirmed]**
@@ -293,7 +293,7 @@ job systems. **[Confirmed]**
 
 ## 8. Environment / Configuration Requirements
 
-- **Toolchain:** stable Rust ≥ 1.80 (edition 2021). **[Confirmed]**
+- **Toolchain:** stable Rust ≥ 1.88 (edition 2024). **[Confirmed]**
 - **Env vars:**
   - `OPCUA_PW` / arbitrary `env:VAR` referenced by `--password env:VAR` or config `password`. **[Confirmed]**
   - `OPCUA_TEST_ENDPOINT` — point integration tests at an external server. **[Confirmed]**

@@ -22,8 +22,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::cli::{
-    ConnectionArgs, Depth, FilterArgs, NodeClassArg, SecurityModeArg, SecurityPolicyArg, Strategy,
-    TraversalArgs,
+    ConnectionArgs, Depth, FilterArgs, NodeClassArg, SecurityPolicyArg, Strategy, TraversalArgs,
 };
 use crate::error::{Result, ScanError};
 
@@ -44,6 +43,8 @@ pub struct Profile {
     pub security_policy: Option<String>,
     /// Security mode name (e.g. `SignAndEncrypt`).
     pub security_mode: Option<String>,
+    /// Allow the deprecated policies `Basic128Rsa15` and `Basic256`.
+    pub allow_deprecated_security: Option<bool>,
     /// Auto-trust the server certificate.
     pub trust_server: Option<bool>,
     /// PKI directory.
@@ -129,53 +130,56 @@ impl Profile {
         fill_opt(&mut c.user, self.user.clone());
         fill_opt(&mut c.password, self.password.clone());
         fill_opt(&mut c.pki_dir, self.pki_dir.clone());
-        if let Some(p) = &self.security_policy {
-            if c.security_policy == SecurityPolicyArg::None {
-                c.security_policy = parse_enum(p, "security-policy")?;
-            }
+        if let Some(p) = &self.security_policy
+            && c.security_policy == SecurityPolicyArg::None
+        {
+            c.security_policy = parse_enum(p, "security-policy")?;
         }
-        if let Some(m) = &self.security_mode {
-            if c.security_mode == SecurityModeArg::None {
-                c.security_mode = parse_enum(m, "security-mode")?;
-            }
+        if let Some(m) = &self.security_mode
+            && c.security_mode.is_none()
+        {
+            c.security_mode = Some(parse_enum(m, "security-mode")?);
+        }
+        if let Some(allow) = self.allow_deprecated_security {
+            c.allow_deprecated_security |= allow;
         }
         if let Some(t) = self.trust_server {
             c.trust_server = c.trust_server || t;
         }
-        if let Some(t) = &self.timeout {
-            if c.timeout == default_timeout() {
-                c.timeout = crate::cli::parse_duration(t).map_err(ScanError::InvalidArgument)?;
-            }
+        if let Some(t) = &self.timeout
+            && c.timeout == default_timeout()
+        {
+            c.timeout = crate::cli::parse_duration(t).map_err(ScanError::InvalidArgument)?;
         }
-        if let Some(r) = self.retry {
-            if c.retry == DEFAULT_RETRY {
-                c.retry = r;
-            }
+        if let Some(r) = self.retry
+            && c.retry == DEFAULT_RETRY
+        {
+            c.retry = r;
         }
         Ok(())
     }
 
     fn apply_traversal(&self, t: &mut TraversalArgs) -> Result<()> {
-        if let Some(d) = &self.depth {
-            if t.depth == Depth::Limited(DEFAULT_DEPTH) {
-                t.depth = crate::cli::parse_depth(d).map_err(ScanError::InvalidArgument)?;
-            }
+        if let Some(d) = &self.depth
+            && t.depth == Depth::Limited(DEFAULT_DEPTH)
+        {
+            t.depth = crate::cli::parse_depth(d).map_err(ScanError::InvalidArgument)?;
         }
         fill_opt(&mut t.root, self.root.clone());
-        if let Some(s) = &self.strategy {
-            if t.strategy == Strategy::Bfs {
-                t.strategy = parse_enum(s, "strategy")?;
-            }
+        if let Some(s) = &self.strategy
+            && t.strategy == Strategy::Bfs
+        {
+            t.strategy = parse_enum(s, "strategy")?;
         }
-        if let Some(w) = self.workers {
-            if t.workers == DEFAULT_WORKERS {
-                t.workers = w;
-            }
+        if let Some(w) = self.workers
+            && t.workers == DEFAULT_WORKERS
+        {
+            t.workers = w;
         }
-        if let Some(p) = self.page_size {
-            if t.page_size == DEFAULT_PAGE_SIZE {
-                t.page_size = p;
-            }
+        if let Some(p) = self.page_size
+            && t.page_size == DEFAULT_PAGE_SIZE
+        {
+            t.page_size = p;
         }
         if t.max_children.is_none() {
             t.max_children = self.max_children;
@@ -280,7 +284,7 @@ fn profile_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{SecurityModeArg, SecurityPolicyArg};
+    use crate::cli::SecurityPolicyArg;
 
     /// A baseline `ConnectionArgs` equivalent to "no CLI flags given" (all at
     /// their built-in defaults), so profile merge can be exercised.
@@ -292,12 +296,16 @@ mod tests {
             cert: None,
             key: None,
             security_policy: SecurityPolicyArg::None,
-            security_mode: SecurityModeArg::None,
+            security_mode: None,
+            allow_deprecated_security: false,
             trust_server: false,
             pki_dir: None,
             timeout: default_timeout(),
             retry: DEFAULT_RETRY,
             cache: None,
+            tedge_dot_config: None,
+            device: None,
+            extras: Default::default(),
         }
     }
 

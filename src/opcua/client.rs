@@ -67,12 +67,22 @@ impl Connection {
             .ok_or_else(|| ScanError::InvalidArgument("an endpoint URL is required".into()))?;
         validate_endpoint(&endpoint)?;
 
+        let (policy_arg, mode_arg) = args
+            .effective_security()
+            .map_err(ScanError::InvalidArgument)?;
+        if policy_arg.is_deprecated() {
+            warn!(
+                policy = policy_arg.name(),
+                "using a deprecated security policy (SHA-1)"
+            );
+        }
         let client = build_client(args)?;
         let identity = resolve_identity(args)?;
-        let (policy, mode) = (
-            security_policy(args.security_policy),
-            security_mode(args.security_mode),
-        );
+        let (policy, mode) = (security_policy(policy_arg), security_mode(mode_arg));
+
+        if matches!(identity, IdentityToken::UserName(..)) {
+            check_password_protection(&client, &endpoint, policy, mode, args).await?;
+        }
 
         let user_token_policy = match &identity {
             IdentityToken::Anonymous => UserTokenPolicy::anonymous(),
@@ -182,9 +192,10 @@ impl Connection {
 
 /// Build a configured [`Client`] from connection args.
 fn build_client(args: &ConnectionArgs) -> Result<Client> {
+    let extras = &args.extras;
     let mut builder = ClientBuilder::new()
-        .application_name(APP_NAME)
-        .application_uri(APP_URI)
+        .application_name(extras.application_name.as_deref().unwrap_or(APP_NAME))
+        .application_uri(extras.application_uri.as_deref().unwrap_or(APP_URI))
         .product_uri(PRODUCT_URI)
         .session_retry_limit(args.retry as i32)
         .session_retry_initial(Duration::from_millis(500))
@@ -193,6 +204,16 @@ fn build_client(args: &ConnectionArgs) -> Result<Client> {
 
     if let Some(dir) = &args.pki_dir {
         builder = builder.pki_dir(dir.clone());
+    }
+
+    // A borrowed application certificate (e.g. the tedge-dot gateway's) is used
+    // as is; never replace it with a generated one.
+    if let Some((cert, key)) = &extras.certificate {
+        debug!(certificate = %cert.display(), "using configured application certificate");
+        builder = builder
+            .certificate_path(cert.clone())
+            .private_key_path(key.clone())
+            .create_sample_keypair(false);
     }
 
     if !args.trust_server {
@@ -222,7 +243,11 @@ fn resolve_identity(args: &ConnectionArgs) -> Result<IdentityToken> {
 }
 
 /// Resolve a password from `--password`, supporting `env:VAR` and secure prompt.
+/// A literal password from a tedge-dot config is used when `--password` is absent.
 fn resolve_password(args: &ConnectionArgs) -> Result<String> {
+    if let (None, Some(literal)) = (&args.password, &args.extras.password) {
+        return Ok(literal.0.clone());
+    }
     match &args.password {
         Some(raw) => {
             if let Some(var) = raw.strip_prefix("env:") {
@@ -250,9 +275,56 @@ fn validate_endpoint(endpoint: &str) -> Result<()> {
     }
 }
 
+/// Refuse or warn about a password that would travel unprotected (tedge-dot
+/// connector spec §6.2): on a channel without message security, or on a
+/// signed-only channel whose UserName token policy explicitly names `None`.
+async fn check_password_protection(
+    client: &Client,
+    endpoint: &str,
+    policy: SecurityPolicy,
+    mode: MessageSecurityMode,
+    args: &ConnectionArgs,
+) -> Result<()> {
+    let unprotected = match mode {
+        MessageSecurityMode::None => Some("the channel has no message security"),
+        MessageSecurityMode::Sign => {
+            let endpoints = client
+                .get_server_endpoints_from_url(endpoint)
+                .await
+                .map_err(|e| ScanError::service("GetEndpoints", e.status()))?;
+            let token_policy_none =
+                Client::find_matching_endpoint(&endpoints, endpoint, policy, mode)
+                    .and_then(|ep| ep.user_identity_tokens)
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|t| t.token_type == opcua::types::UserTokenType::UserName)
+                    .is_some_and(|t| {
+                        SecurityPolicy::from_uri(t.security_policy_uri.as_ref())
+                            == SecurityPolicy::None
+                    });
+            token_policy_none.then_some(
+                "the channel is only signed and the server's username token policy names None",
+            )
+        }
+        _ => None,
+    };
+    let Some(why) = unprotected else {
+        return Ok(());
+    };
+    if args.extras.refuse_plaintext_password {
+        return Err(ScanError::Credential(format!(
+            "plaintext password refused: {why}; set allow_plaintext_password = true to allow it"
+        )));
+    }
+    warn!("the password is sent unprotected: {why}");
+    Ok(())
+}
+
 fn security_policy(arg: SecurityPolicyArg) -> SecurityPolicy {
     match arg {
         SecurityPolicyArg::None => SecurityPolicy::None,
+        SecurityPolicyArg::Basic128Rsa15 => SecurityPolicy::Basic128Rsa15,
+        SecurityPolicyArg::Basic256 => SecurityPolicy::Basic256,
         SecurityPolicyArg::Basic256Sha256 => SecurityPolicy::Basic256Sha256,
         SecurityPolicyArg::Aes128Sha256RsaOaep => SecurityPolicy::Aes128Sha256RsaOaep,
         SecurityPolicyArg::Aes256Sha256RsaPss => SecurityPolicy::Aes256Sha256RsaPss,

@@ -79,10 +79,10 @@ impl PatternSet {
         if self.empty {
             return false;
         }
-        if let Some(globs) = &self.globs {
-            if globs.is_match(path) {
-                return true;
-            }
+        if let Some(globs) = &self.globs
+            && globs.is_match(path)
+        {
+            return true;
         }
         self.regexes.iter().any(|re| re.is_match(path))
     }

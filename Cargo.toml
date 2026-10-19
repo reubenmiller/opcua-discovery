@@ -1,8 +1,8 @@
 [package]
 name = "opcua-scan"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.88"
 description = "Production-grade CLI for efficiently scanning and discovering an OPC UA namespace."
 license = "Apache-2.0"
 repository = "https://github.com/thin-edge/opcua-discovery"

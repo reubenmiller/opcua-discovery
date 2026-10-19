@@ -6,7 +6,7 @@
 
 ## A. Build, CI & packaging
 1. **CI added** (`.github/workflows/ci.yml` + `nightly.yml`). PR CI runs fmt, clippy
-   (`-D warnings`), the hermetic test matrix (ubuntu/macos stable + ubuntu MSRV 1.80) and
+   (`-D warnings`), the hermetic test matrix (ubuntu/macos stable + ubuntu MSRV 1.88) and
    coverage; the nightly workflow runs the Docker-based interoperability suite. **[Resolved]**
 2. **Docker for interop only**: `tests/interop/docker-compose.yml` brings up reference
    servers (Microsoft OPC-PLC, node-opcua; opt-in open62541/Milo/refserver). The product

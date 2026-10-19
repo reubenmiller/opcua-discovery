@@ -1,7 +1,7 @@
 //! Graceful cancellation via Ctrl+C.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{info, warn};
 

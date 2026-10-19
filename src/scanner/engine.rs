@@ -15,7 +15,7 @@ use opcua::types::{
     BrowseDescription, BrowseDirection, BrowseResult, BrowseResultMask, ByteString, NodeId,
     ReferenceDescription, ReferenceTypeId, StatusCode,
 };
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tracing::{debug, trace};
 
 use crate::cli::{Depth, Strategy};
@@ -251,7 +251,9 @@ impl Worker {
                     .filters
                     .attributes_match(&node_id, &attr, &self.namespaces)
             {
-                let record = self.build_record(&reference, &node_id, &path, &attr).await;
+                let record = self
+                    .build_record(&reference, &node_id, &path, &attr, &pending.node_id)
+                    .await;
                 if crate::filters::is_subscribable(&attr) {
                     self.stats.inc_subscribable();
                 }
@@ -283,6 +285,7 @@ impl Worker {
         node_id: &NodeId,
         path: &str,
         attr: &crate::opcua::attributes::NodeAttributes,
+        parent: &NodeId,
     ) -> NodeRecord {
         let datatype = attr.data_type.as_ref().map(|dt| {
             crate::filters::predicate::builtin_datatype_name(dt)
@@ -307,14 +310,16 @@ impl Worker {
             current_value: None,
             engineering_units: None,
             description: attr.description.clone(),
+            parent_node_id: (reference.node_class == opcua::types::NodeClass::Method)
+                .then(|| parent.to_string()),
         };
 
-        if self.config.preview_values && record.subscribable {
-            if let Ok(values) = read_values(&self.session, std::slice::from_ref(node_id)).await {
-                if let Some(snapshot) = values.into_iter().next() {
-                    record.current_value = snapshot.value;
-                }
-            }
+        if self.config.preview_values
+            && record.subscribable
+            && let Ok(values) = read_values(&self.session, std::slice::from_ref(node_id)).await
+            && let Some(snapshot) = values.into_iter().next()
+        {
+            record.current_value = snapshot.value;
         }
 
         record
@@ -352,11 +357,11 @@ impl Worker {
             if let Some(rs) = result.references.take() {
                 for r in rs {
                     refs.push(r);
-                    if let Some(max) = self.config.max_children {
-                        if refs.len() > max {
-                            truncated = true;
-                            break;
-                        }
+                    if let Some(max) = self.config.max_children
+                        && refs.len() > max
+                    {
+                        truncated = true;
+                        break;
                     }
                 }
             }
@@ -371,11 +376,11 @@ impl Worker {
                 .ok_or(StatusCode::BadUnexpectedError)?;
         }
 
-        if let Some(max) = self.config.max_children {
-            if refs.len() > max {
-                refs.truncate(max);
-                truncated = true;
-            }
+        if let Some(max) = self.config.max_children
+            && refs.len() > max
+        {
+            refs.truncate(max);
+            truncated = true;
         }
         Ok((refs, truncated))
     }

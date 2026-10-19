@@ -38,6 +38,13 @@ pub fn write_export(
 ) -> Result<()> {
     records.sort_by(|a, b| a.browse_path.cmp(&b.browse_path));
 
+    if encoding == Encoding::TedgeDot {
+        // Needs the namespace table and merge semantics: see `tedge_dot::library`.
+        return Err(ScanError::Export(
+            "a tedge-dot point library can only be written by `browse`".into(),
+        ));
+    }
+
     let mut writer: Box<dyn Write> = match file {
         Some(path) => Box::new(std::io::BufWriter::new(std::fs::File::create(path)?)),
         None => Box::new(std::io::BufWriter::new(std::io::stdout())),
@@ -58,6 +65,7 @@ pub fn write_export(
                 writer.write_all(b"\n")?;
             }
         }
+        Encoding::TedgeDot => unreachable!("handled above"),
         Encoding::Csv => {
             // Serde + skip_serializing_if would yield a variable number of
             // columns per row, which the CSV writer rejects. Emit a fixed set

@@ -26,6 +26,8 @@ pub struct ValueReading {
     pub server_time: Option<String>,
     /// Status code, when not Good.
     pub status: Option<String>,
+    /// When the client received the value (RFC3339); the time of last resort.
+    pub received_time: String,
 }
 
 impl ValueReading {
@@ -42,14 +44,17 @@ impl ValueReading {
             source_time: dv.source_timestamp.as_ref().map(|t| t.to_rfc3339()),
             server_time: dv.server_timestamp.as_ref().map(|t| t.to_rfc3339()),
             status,
+            received_time: opcua::types::DateTime::now().to_rfc3339(),
         }
     }
 
-    /// Best available timestamp (source preferred over server).
+    /// Best available timestamp: source, else server, else when the value was
+    /// received (some servers send neither timestamp).
     pub fn best_time(&self) -> Option<String> {
         self.source_time
             .clone()
             .or_else(|| self.server_time.clone())
+            .or_else(|| Some(self.received_time.clone()))
     }
 }
 
@@ -138,11 +143,7 @@ pub fn eu_label_from_data_value(dv: &DataValue) -> Option<String> {
         Variant::ExtensionObject(obj) => {
             let eu = obj.inner_as::<EUInformation>()?;
             let label = eu.display_name.text.to_string();
-            if label.is_empty() {
-                None
-            } else {
-                Some(label)
-            }
+            if label.is_empty() { None } else { Some(label) }
         }
         _ => None,
     }
@@ -355,6 +356,7 @@ mod tests {
             source_time: Some("2020-01-01T00:00:00Z".into()),
             server_time: Some("2020-01-02T00:00:00Z".into()),
             status: None,
+            received_time: "2020-01-03T00:00:00Z".into(),
         };
         assert_eq!(reading.best_time().as_deref(), Some("2020-01-01T00:00:00Z"));
 
@@ -363,6 +365,7 @@ mod tests {
             source_time: None,
             server_time: Some("2020-01-02T00:00:00Z".into()),
             status: None,
+            received_time: "2020-01-03T00:00:00Z".into(),
         };
         assert_eq!(
             server_only.best_time().as_deref(),
@@ -374,8 +377,12 @@ mod tests {
             source_time: None,
             server_time: None,
             status: None,
+            received_time: "2020-01-03T00:00:00Z".into(),
         };
-        assert_eq!(none.best_time(), None);
+        // No server timestamp: the receive time, never null.
+        assert_eq!(none.best_time().as_deref(), Some("2020-01-03T00:00:00Z"));
+        let fresh = ValueReading::from_data_value(&DataValue::default());
+        assert!(fresh.best_time().is_some_and(|t| t.starts_with("20")));
     }
 
     #[test]

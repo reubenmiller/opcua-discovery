@@ -41,6 +41,8 @@ pub struct SampleMeta {
     pub source_endpoint: Option<String>,
     /// Human-readable connection / source name (from `[connection] name`).
     pub source_name: Option<String>,
+    /// Explicit output key (a tedge-dot point id); wins over the browse path.
+    pub key: Option<String>,
 }
 
 impl SampleMeta {
@@ -83,7 +85,10 @@ impl SampleMeta {
     /// The output key for this data point: the full browse path when known,
     /// otherwise the supplied fallback measurement name.
     fn output_key<'a>(&'a self, fallback: &'a str) -> &'a str {
-        self.browse_path.as_deref().unwrap_or(fallback)
+        self.key
+            .as_deref()
+            .or(self.browse_path.as_deref())
+            .unwrap_or(fallback)
     }
 }
 
@@ -346,4 +351,21 @@ fn write_csv(writer: &mut dyn Write, rows: &[Value]) -> Result<()> {
 fn open_file(path: &Path) -> Result<Box<dyn Write + Send>> {
     let file = std::fs::File::create(path)?;
     Ok(Box::new(std::io::BufWriter::new(file)))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_key_wins_over_browse_path_and_name() {
+        let mut meta = SampleMeta {
+            browse_path: Some("Factory/Motor/Temperature".into()),
+            ..Default::default()
+        };
+        assert_eq!(meta.output_key("Temperature"), "Factory/Motor/Temperature");
+        meta.key = Some("temperature".into());
+        assert_eq!(meta.output_key("Temperature"), "temperature");
+        assert_eq!(SampleMeta::default().output_key("name"), "name");
+    }
 }

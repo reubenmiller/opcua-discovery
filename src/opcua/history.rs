@@ -70,10 +70,10 @@ pub async fn read_raw(
             return Err(ScanError::service("HistoryRead", status_code));
         }
 
-        if let Some(data) = history_data.into_inner_as::<HistoryData>() {
-            if let Some(values) = data.data_values {
-                readings.extend(values.iter().map(ValueReading::from_data_value));
-            }
+        if let Some(data) = history_data.into_inner_as::<HistoryData>()
+            && let Some(values) = data.data_values
+        {
+            readings.extend(values.iter().map(ValueReading::from_data_value));
         }
 
         if next_cp.is_null_or_empty() {

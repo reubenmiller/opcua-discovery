@@ -33,6 +33,13 @@
   - `Format::Tree` → `tree::render`, `Format::Table` → `table::render`, `Format::Json` → pretty JSON.
 - `write_export(records, encoding, file)` — sort then write machine format to file/stdout:
   - `Encoding::Json` (array), `Ndjson` (one object/line), `Csv` (fixed columns).
+  - `Encoding::TedgeDot` is refused here (it needs the namespace table and merge semantics);
+    `browse` and the TUI write it through `src/tedge_dot/library.rs` after
+    `src/tedge_dot/schema.rs::discover` has read the custom datatypes (DataTypeDefinition,
+    HasSubtype) and method arguments: record → point(s) (scalar, enum + map, structure fields,
+    `call_method`), skip reasons, shortest-unique snake_case ids, and a `toml_edit` merge keyed by
+    `PointKey` (node + field, or object + method, by namespace URI).
+- `NodeRecord::parent_node_id` is set for Methods only (the object they were browsed from).
 - **CSV fixed columns:** `browse_path, display_name, browse_name, node_id, namespace_uri, node_class,
   datatype, value_rank, access_level, user_access_level, historizing, subscribable, validation_status,
   current_value, engineering_units, description` (avoids variable-columns-per-row).

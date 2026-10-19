@@ -5,8 +5,8 @@ pub mod generate;
 pub mod selection;
 pub mod sink;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use opcua::client::Session;
@@ -18,11 +18,11 @@ use tracing::{info, warn};
 use crate::error::{Result, ScanError};
 use crate::export::NodeRecord;
 use crate::filters::FilterSet;
+use crate::opcua::Connection;
 use crate::opcua::history::{self, HistoryQuery};
 use crate::opcua::namespaces::NamespaceTable;
 use crate::opcua::value::read_readings;
-use crate::opcua::Connection;
-use crate::scanner::{resolve_root, Engine, ScanConfig};
+use crate::scanner::{Engine, ScanConfig, resolve_root};
 use crate::subscription::{self, SubscriptionParams};
 
 use config::{AcquireConfig, NodeMode, TaskConfig};
@@ -37,11 +37,49 @@ use sink::{Sample, SampleMeta, Sink};
 /// cached back into it.
 pub async fn run(
     config: AcquireConfig,
+    connection_args: crate::cli::ConnectionArgs,
     duration: Option<Duration>,
     config_path: Option<&std::path::Path>,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
-    let connection_args = config.connection_args()?;
+    // `cancel` is the process-wide Ctrl+C flag, which `main` reports as exit
+    // code 4. The duration must end the run without looking like an
+    // interruption, so the tasks watch a run-local flag that follows Ctrl+C
+    // and is also set by the duration timer.
+    let signal = cancel;
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let (signal, cancel) = (signal.clone(), cancel.clone());
+        tokio::spawn(async move {
+            while !cancel.load(Ordering::Relaxed) {
+                if signal.load(Ordering::Relaxed) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+    let result = run_tasks(
+        config,
+        connection_args,
+        duration,
+        config_path,
+        cancel.clone(),
+    )
+    .await;
+    // Ends the watcher, so no watcher outlives its run (--config-dir runs several).
+    cancel.store(true, Ordering::Relaxed);
+    result
+}
+
+/// The body of [`run`], with the run-local stop flag as `cancel`.
+async fn run_tasks(
+    config: AcquireConfig,
+    connection_args: crate::cli::ConnectionArgs,
+    duration: Option<Duration>,
+    config_path: Option<&std::path::Path>,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
     let conn = Connection::connect(&connection_args).await?;
     let session = conn.session().clone();
 
@@ -65,17 +103,17 @@ pub async fn run(
         .await?;
         // Cache any reconstructed browse paths back into the source config so
         // later runs can skip the inverse browse.
-        if let Some(path) = config_path {
-            if !resolved.path_updates.is_empty() {
-                if let Err(e) = persist_node_paths(path, &resolved.path_updates) {
-                    warn!(error = %e, "failed to cache browse paths into config");
-                } else {
-                    info!(
-                        count = resolved.path_updates.len(),
-                        config = %path.display(),
-                        "cached reconstructed browse paths into config"
-                    );
-                }
+        if let Some(path) = config_path
+            && !resolved.path_updates.is_empty()
+        {
+            if let Err(e) = persist_node_paths(path, &resolved.path_updates) {
+                warn!(error = %e, "failed to cache browse paths into config");
+            } else {
+                info!(
+                    count = resolved.path_updates.len(),
+                    config = %path.display(),
+                    "cached reconstructed browse paths into config"
+                );
             }
         }
         resolved.nodes
@@ -165,14 +203,12 @@ pub async fn run(
     }
 
     // Bound continuous tasks by duration if requested.
-    if has_continuous {
-        if let Some(d) = duration {
-            let timer_cancel = cancel.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(d).await;
-                timer_cancel.store(true, Ordering::Relaxed);
-            });
-        }
+    if has_continuous && let Some(d) = duration {
+        let timer_cancel = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(d).await;
+            timer_cancel.store(true, Ordering::Relaxed);
+        });
     }
 
     while set.join_next().await.is_some() {}

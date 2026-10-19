@@ -1,19 +1,19 @@
 //! `browse` subcommand: the primary discovery command.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use clap::Args;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::cli::{ConnectionArgs, FilterArgs, OutputArgs, TraversalArgs};
+use crate::cli::{ConnectionArgs, Encoding, FilterArgs, OutputArgs, TraversalArgs};
 use crate::error::Result;
-use crate::export::{render_display, write_export, NodeRecord};
+use crate::export::{NodeRecord, render_display, write_export};
 use crate::filters::FilterSet;
 use crate::opcua::{Connection, NamespaceTable};
-use crate::scanner::{resolve_root, Engine, ScanConfig};
+use crate::scanner::{Engine, ScanConfig, resolve_root};
 use crate::subscription;
 
 /// Arguments for the `browse` command.
@@ -39,8 +39,18 @@ pub struct BrowseArgs {
     /// Reuse an existing `acquire` config: its `[connection]` supplies defaults
     /// and its `selection.node_ids` are pre-marked in the TUI. Saving (the `a`
     /// action) updates this file in place. CLI flags override config values.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", conflicts_with = "tedge_dot_config")]
     pub config: Option<std::path::PathBuf>,
+
+    /// `[library] type` of a new tedge-dot point library. Defaults to the
+    /// `type` of the `--tedge-dot-config` device.
+    #[arg(long, value_name = "TYPE")]
+    pub library_type: Option<String>,
+
+    /// tedge-dot point library written by the TUI (`t`). When it exists, its
+    /// points are pre-marked and saving merges into it.
+    #[arg(long, value_name = "FILE", default_value = "point-library.toml")]
+    pub library: std::path::PathBuf,
 }
 
 /// Run the `browse` command.
@@ -78,10 +88,10 @@ pub async fn run(mut args: BrowseArgs, cancel: Arc<AtomicBool>) -> Result<()> {
                 &namespaces,
             )?;
             selected_ids.insert(id.to_string());
-            if let Some(path) = &node.path {
-                if !path.is_empty() {
-                    selected_paths.insert(path.clone());
-                }
+            if let Some(path) = &node.path
+                && !path.is_empty()
+            {
+                selected_paths.insert(path.clone());
             }
         }
         // Legacy bare ids carry no URI: use them verbatim.
@@ -90,6 +100,19 @@ pub async fn run(mut args: BrowseArgs, cancel: Arc<AtomicBool>) -> Result<()> {
 
     // Interactive explorer: opt-in, replaces streaming/export output entirely.
     if args.output.tui {
+        // An existing point library: pre-mark its points (translated to the
+        // server's current namespace indexes) so `t` edits it.
+        if args.library.exists() {
+            let text = std::fs::read_to_string(&args.library)?;
+            let ids =
+                crate::tedge_dot::library::node_ids(&text, &namespaces).map_err(|reason| {
+                    crate::error::ScanError::Config {
+                        path: args.library.clone(),
+                        reason,
+                    }
+                })?;
+            selected_ids.extend(ids);
+        }
         // Write target: the source --config, else default.
         let acquire_file = source_config
             .clone()
@@ -108,6 +131,8 @@ pub async fn run(mut args: BrowseArgs, cancel: Arc<AtomicBool>) -> Result<()> {
             selected_ids,
             selected_paths,
             source_config,
+            library_file: args.library.clone(),
+            library_options: library_options(&args),
         };
         let result = crate::tui::run(session, namespaces, filters, options).await;
         conn.disconnect().await;
@@ -171,13 +196,12 @@ fn gen_connection(
 ) -> crate::acquire::generate::GenConnection {
     use crate::cli::{SecurityModeArg, SecurityPolicyArg};
 
-    let security_policy = match args.security_policy {
-        SecurityPolicyArg::None => None,
-        SecurityPolicyArg::Basic256Sha256 => Some("Basic256Sha256".to_string()),
-        SecurityPolicyArg::Aes128Sha256RsaOaep => Some("Aes128Sha256RsaOaep".to_string()),
-        SecurityPolicyArg::Aes256Sha256RsaPss => Some("Aes256Sha256RsaPss".to_string()),
-    };
-    let security_mode = match args.security_mode {
+    // The connection succeeded, so the pair is valid; write it explicitly.
+    let (policy, mode) = args
+        .effective_security()
+        .unwrap_or((SecurityPolicyArg::None, SecurityModeArg::None));
+    let security_policy = (policy != SecurityPolicyArg::None).then(|| policy.name().to_string());
+    let security_mode = match mode {
         SecurityModeArg::None => None,
         SecurityModeArg::Sign => Some("Sign".to_string()),
         SecurityModeArg::SignAndEncrypt => Some("SignAndEncrypt".to_string()),
@@ -188,6 +212,7 @@ fn gen_connection(
         trust_server: args.trust_server,
         security_policy,
         security_mode,
+        allow_deprecated_security: args.allow_deprecated_security,
         user: args.user.clone(),
         pki_dir: args.pki_dir.clone(),
     }
@@ -243,7 +268,9 @@ async fn scan_once(
     }
 
     // Render or export.
-    if let Some(encoding) = args.output.output {
+    if args.output.output == Some(Encoding::TedgeDot) {
+        write_library(session, &records, namespaces, args).await?;
+    } else if let Some(encoding) = args.output.output {
         write_export(&mut records, encoding, args.output.file.as_deref())?;
     } else {
         render_display(&mut records, args.output.format)?;
@@ -271,6 +298,71 @@ async fn scan_once(
         snap.elapsed
     );
 
+    Ok(())
+}
+
+/// The options for writing a tedge-dot point library from `args`.
+pub fn library_options(args: &BrowseArgs) -> crate::tedge_dot::library::LibraryOptions {
+    crate::tedge_dot::library::LibraryOptions {
+        library_type: args
+            .library_type
+            .clone()
+            .or_else(|| args.connection.extras.device_type.clone()),
+        endpoint: args.connection.endpoint.clone().unwrap_or_default(),
+    }
+}
+
+/// Write `records` as a tedge-dot point library to `--file` (merging into an
+/// existing library) or stdout, after discovering their custom datatypes and
+/// method arguments. The file is left untouched on any error.
+async fn write_library(
+    session: &opcua::client::Session,
+    records: &[NodeRecord],
+    namespaces: &NamespaceTable,
+    args: &BrowseArgs,
+) -> Result<()> {
+    use crate::error::ScanError;
+
+    let file = args.output.file.as_deref();
+    let existing = match file {
+        Some(path) if path.exists() => Some(std::fs::read_to_string(path)?),
+        _ => None,
+    };
+    let schema = crate::tedge_dot::schema::discover(session, records).await;
+    let outcome = crate::tedge_dot::library::write(
+        existing.as_deref(),
+        records,
+        &Default::default(),
+        namespaces,
+        &library_options(args),
+        &schema,
+    )
+    .map_err(|reason| match file {
+        Some(path) => ScanError::Config {
+            path: path.to_path_buf(),
+            reason,
+        },
+        None => ScanError::Export(reason),
+    })?;
+
+    match file {
+        Some(path) => {
+            std::fs::write(path, &outcome.text)?;
+            eprintln!(
+                "tedge-dot library {}: {} point(s) added, {} in total, {} node(s) skipped",
+                path.display(),
+                outcome.added,
+                outcome.total,
+                outcome.skipped.len()
+            );
+            if existing.is_some() {
+                for s in &outcome.skipped {
+                    eprintln!("  skipped {}  {}  ({})", s.node_id, s.browse_path, s.reason);
+                }
+            }
+        }
+        None => print!("{}", outcome.text),
+    }
     Ok(())
 }
 

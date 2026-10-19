@@ -22,13 +22,17 @@ Command = Connect | Browse | Search | Sample | Acquire
 | `password` | `--password` | — | `env:VAR` or secure prompt; requires `--user`; never logged |
 | `cert` | `--cert FILE` | — | client cert (PEM/DER) |
 | `key` | `--key FILE` | — | requires `--cert` |
-| `security_policy` | `--security-policy` | `None` | `None`/`Basic256Sha256`/`Aes128Sha256RsaOaep`/`Aes256Sha256RsaPss` |
-| `security_mode` | `--security-mode` | `None` | `None`/`Sign`/`SignAndEncrypt` |
+| `security_policy` | `--security-policy` | `None` | all six async-opcua policies incl. deprecated `Basic128Rsa15`/`Basic256`; aliases: tedge-dot names, policy URIs |
+| `security_mode` | `--security-mode` | — | `Option`; `effective_security()` → SignAndEncrypt for a secured policy, else None; rejects inconsistent pairs |
+| `allow_deprecated_security` | `--allow-deprecated-security` | false | gate for the SHA-1 policies, checked in `Connection::connect` |
 | `trust_server` | `--trust-server` | false | INSECURE; lab only |
 | `pki_dir` | `--pki-dir DIR` | — | own cert/key/trusted |
 | `timeout` | `--timeout` | `10s` | humantime |
 | `retry` | `--retry` | `3` | transient retries |
 | `cache` | `--cache DIR` | — | namespace-table cache |
+| `tedge_dot_config` | `--tedge-dot-config FILE` | — | fill unset fields from a tedge-dot OPC UA connector config (`src/tedge_dot/connection.rs`, applied in `main.rs` after `--profile`) |
+| `device` | `--device NAME` | — | device in that config; optional with one device |
+| `extras` | — (`#[arg(skip)]`) | — | `ConnectionExtras`: literal password, application name/URI, borrowed application certificate, device `type` |
 
 ### `TraversalArgs` (browse/search/sample)
 | Field | Flag | Default |
@@ -46,7 +50,7 @@ Command = Connect | Browse | Search | Sample | Acquire
 `writable`, `historizing`, `subscribable`.
 
 ### `OutputArgs`
-`format` (`--format tree|table|json`, default `tree`), `output` (`--output json|ndjson|csv`),
+`format` (`--format tree|table|json`, default `tree`), `output` (`--output json|ndjson|csv|tedge-dot`; `tedge-dot` is `browse`-only),
 `file` (`--file`), `preview_values`, `tui`, `watch` (DURATION).
 
 ### Helpers
@@ -62,7 +66,9 @@ Command = Connect | Browse | Search | Sample | Acquire
 namespaces, endpoints (+ security) → disconnect.
 
 ### `browse` (`src/cli/browse.rs`) — primary
-`BrowseArgs { connection, traversal, filters, output, validate_subscription, config }`.
+`BrowseArgs { connection, traversal, filters, output, validate_subscription, config, library_type, library }`.
+`--output tedge-dot` writes/merges a point library via `tedge_dot::library::write`; `--library`
+(default `point-library.toml`) is the TUI's library, whose points are pre-marked when it exists.
 Optionally pre-seed from `--config` (acquire.toml) → connect → load namespaces (cacheable) →
 compile filters → if `--tui` launch explorer (early return) → else watch-loop: run `Engine`, stream
 `NodeRecord`s, optionally validate subscriptions, render/export; repeat on `--watch`.

@@ -155,6 +155,19 @@ mode = "subscribe"
 publishing_interval = "500ms"
 ```
 
+## Acquire from a tedge-dot config (`src/cli/acquire.rs`, `src/tedge_dot/points.rs`)
+`acquire --tedge-dot-config FILE [--device NAME] [--config extras.toml]`:
+`tedge_dot::points::load` resolves the device's points (`points_from` libraries via tedge-dot's
+search path, then inline points, later `id` replacing earlier) into `NodeSelector`s: `id` as
+written, `namespace` = URI of its index in the applicable table (library, else device; none for
+ns 0 / no table), `mode` poll for `subscribe = false` else auto, and `key` = point id
+(`#[serde(skip)]`, carried into `SampleMeta.key`, which `output_key` prefers). The existing
+`remap_node_id` then maps URI → server index and fails on a missing URI. The connection comes from
+`tedge_dot::connection::apply`; `AcquireConfig::extras_from_file` accepts only `[acquire]`,
+`[output]`, `[[task]]`; default tasks come from the device/connector `poll_interval` (2s) and
+`sampling_interval`. `acquire::run` takes the `ConnectionArgs` and an optional write-back path,
+which is `None` here, so the tedge-dot files are never modified.
+
 ## Extension points
 - New task type → add a `TaskConfig` variant + a `run_*` task + spawn wiring.
 - New sink format → add an `OutputFormat` variant + `emit_*`/`finish` branches.

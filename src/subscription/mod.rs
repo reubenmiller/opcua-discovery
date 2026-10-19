@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use opcua::client::{DataChangeCallback, Session};
@@ -278,7 +278,9 @@ pub async fn run_subscription(
                     .source_timestamp
                     .as_ref()
                     .or(dv.server_timestamp.as_ref())
-                    .map(|t| t.to_rfc3339());
+                    .map(|t| t.to_rfc3339())
+                    // Some servers send neither timestamp: use the receive time.
+                    .or_else(|| Some(opcua::types::DateTime::now().to_rfc3339()));
                 let status = dv.status.filter(|s| !s.is_good()).map(|s| s.to_string());
                 let sample = Sample {
                     name,

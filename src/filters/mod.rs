@@ -5,7 +5,7 @@ pub mod pattern;
 pub mod predicate;
 
 pub use pattern::PatternSet;
-pub use predicate::{is_subscribable, Predicate};
+pub use predicate::{Predicate, is_subscribable};
 
 use opcua::types::NodeId;
 

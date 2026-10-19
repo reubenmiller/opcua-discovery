@@ -1,14 +1,15 @@
 //! Security, authentication and certificate-trust integration tests.
 //!
-//! The in-process server (see [`common`]) exposes three endpoints — `None`,
-//! `Basic256Sha256`/`Sign` and `Basic256Sha256`/`SignAndEncrypt` — and accepts
-//! both anonymous and username/password identities. These tests exercise the
+//! The in-process server (see [`common`]) exposes `None` plus Sign and
+//! SignAndEncrypt endpoints for every secured policy async-opcua implements
+//! ([`common::SECURE_POLICIES`]), and accepts both anonymous and
+//! username/password identities. These tests exercise the
 //! SecureChannel handshake and Session activation across security modes and
 //! identity tokens, plus the server-certificate trust decision.
 
 mod common;
 
-use common::{run_cli, run_cli_ok, TEST_NS, TEST_PASSWORD, TEST_USER};
+use common::{SECURE_POLICIES, TEST_NS, TEST_PASSWORD, TEST_USER, run_cli, run_cli_ok};
 
 #[test]
 fn sign_handshake_succeeds_when_server_trusted() {
@@ -138,4 +139,116 @@ fn wrong_password_is_rejected() {
         !out.status.success(),
         "connect succeeded with an incorrect password"
     );
+}
+
+/// Connect with `policy`/`mode`, optionally as the test user; the deprecated
+/// policies get their opt-in.
+fn connect_args<'a>(endpoint: &'a str, policy: &'a str, mode: &'a str, user: bool) -> Vec<&'a str> {
+    let mut args = vec![
+        "connect",
+        endpoint,
+        "--security-policy",
+        policy,
+        "--security-mode",
+        mode,
+        "--trust-server",
+        "--allow-deprecated-security",
+    ];
+    if user {
+        args.extend_from_slice(&["--user", TEST_USER, "--password", TEST_PASSWORD]);
+    }
+    args
+}
+
+#[test]
+fn every_policy_and_mode_connects() {
+    let endpoint = common::start();
+    let combinations: Vec<(&str, &str, bool)> = SECURE_POLICIES
+        .iter()
+        .flat_map(|(policy, _)| {
+            ["Sign", "SignAndEncrypt"]
+                .into_iter()
+                .flat_map(move |mode| [false, true].map(|user| (*policy, mode, user)))
+        })
+        .collect();
+    // Each handshake takes seconds; run them side by side.
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = combinations
+            .iter()
+            .map(|&(policy, mode, user)| {
+                let endpoint = &endpoint;
+                scope.spawn(move || {
+                    let out = run_cli(&connect_args(endpoint, policy, mode, user));
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    (!out.status.success() || !stdout.contains(TEST_NS)).then(|| {
+                        format!(
+                            "{policy}/{mode} user={user}: {}",
+                            String::from_utf8_lossy(&out.stderr).trim()
+                        )
+                    })
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .collect()
+    });
+    assert_eq!(combinations.len(), 20);
+    assert!(
+        failures.is_empty(),
+        "failed combinations:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn deprecated_policy_needs_opt_in() {
+    let endpoint = common::start();
+    let out = run_cli(&[
+        "connect",
+        &endpoint,
+        "--security-policy",
+        "Basic256",
+        "--trust-server",
+    ]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--allow-deprecated-security"), "{stderr}");
+}
+
+#[test]
+fn policy_without_mode_uses_sign_and_encrypt() {
+    let endpoint = common::start();
+    let out = run_cli_ok(&[
+        "connect",
+        &endpoint,
+        "--security-policy",
+        "Aes256_Sha256_RsaPss",
+        "--trust-server",
+    ]);
+    assert!(out.contains(TEST_NS), "{out}");
+}
+
+#[test]
+fn plaintext_password_on_none_channel_is_warned_about() {
+    let endpoint = common::start();
+    let out = common::run_cli_with_env(
+        &[
+            "connect",
+            &endpoint,
+            "--user",
+            TEST_USER,
+            "--password",
+            TEST_PASSWORD,
+        ],
+        &[("RUST_LOG", "warn")],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("sent unprotected"), "{stderr}");
 }

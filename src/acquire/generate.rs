@@ -44,6 +44,8 @@ pub struct GenConnection {
     pub security_policy: Option<String>,
     /// Security mode name, if not the default `None`.
     pub security_mode: Option<String>,
+    /// Whether a deprecated security policy is allowed.
+    pub allow_deprecated_security: bool,
     /// Username, if user/password auth is in use (password is NOT written).
     pub user: Option<String>,
     /// PKI directory, if set.
@@ -91,6 +93,8 @@ struct GenConnectionToml {
     security_policy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     security_mode: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    allow_deprecated_security: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     user: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -224,6 +228,7 @@ pub fn generate_toml(
             trust_server: conn.trust_server,
             security_policy: conn.security_policy.clone(),
             security_mode: conn.security_mode.clone(),
+            allow_deprecated_security: conn.allow_deprecated_security,
             user: conn.user.clone(),
             pki_dir: conn.pki_dir.as_ref().map(|p| p.display().to_string()),
         },
@@ -306,7 +311,7 @@ pub fn update_selection_in_toml(original: &str, nodes: &[GenNode]) -> Result<Str
 /// node's `id` field. Preserves all other content (formatting, comments, tasks).
 /// `updates` is a list of `(node id, browse path)` pairs.
 pub fn update_node_paths_in_toml(original: &str, updates: &[(String, String)]) -> Result<String> {
-    use toml_edit::{value, DocumentMut};
+    use toml_edit::{DocumentMut, value};
 
     if updates.is_empty() {
         return Ok(original.to_string());
@@ -326,10 +331,10 @@ pub fn update_node_paths_in_toml(original: &str, updates: &[(String, String)]) -
 
     for table in nodes.iter_mut() {
         let id = table.get("id").and_then(|v| v.as_str()).map(str::to_string);
-        if let Some(id) = id {
-            if let Some((_, path)) = updates.iter().find(|(uid, _)| uid == &id) {
-                table["path"] = value(path.clone());
-            }
+        if let Some(id) = id
+            && let Some((_, path)) = updates.iter().find(|(uid, _)| uid == &id)
+        {
+            table["path"] = value(path.clone());
         }
     }
 
@@ -433,14 +438,18 @@ mod tests {
 
         let parsed = AcquireConfig::from_toml(&toml).expect("re-parse generated config");
         // Both poll and subscribe task blocks are present.
-        assert!(parsed
-            .tasks
-            .iter()
-            .any(|t| matches!(t, TaskConfig::Poll { .. })));
-        assert!(parsed
-            .tasks
-            .iter()
-            .any(|t| matches!(t, TaskConfig::Subscribe { .. })));
+        assert!(
+            parsed
+                .tasks
+                .iter()
+                .any(|t| matches!(t, TaskConfig::Poll { .. }))
+        );
+        assert!(
+            parsed
+                .tasks
+                .iter()
+                .any(|t| matches!(t, TaskConfig::Subscribe { .. }))
+        );
         // Per-node modes survive; the auto node has no explicit mode.
         let by_id = |id: &str| {
             parsed

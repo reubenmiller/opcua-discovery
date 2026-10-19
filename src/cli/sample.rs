@@ -1,20 +1,20 @@
 //! `sample` subcommand: subscribe to matching variables and print live updates.
 
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use clap::Args;
 use opcua::types::NodeId;
 use tokio::sync::mpsc;
 
-use crate::cli::{parse_duration, ConnectionArgs, FilterArgs, TraversalArgs};
+use crate::cli::{ConnectionArgs, FilterArgs, TraversalArgs, parse_duration};
 use crate::error::Result;
 use crate::export::NodeRecord;
 use crate::filters::FilterSet;
 use crate::opcua::Connection;
-use crate::scanner::{resolve_root, Engine, ScanConfig};
+use crate::scanner::{Engine, ScanConfig, resolve_root};
 use crate::subscription;
 
 /// Arguments for the `sample` command.

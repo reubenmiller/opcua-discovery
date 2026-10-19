@@ -7,8 +7,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use opcua::client::Session;
 use opcua::types::NodeId;
@@ -20,13 +20,13 @@ use crate::acquire::config::NodeMode;
 use crate::acquire::sink::SampleMeta;
 use crate::error::{Result, ScanError};
 use crate::export::NodeRecord;
-use crate::filters::predicate::{builtin_datatype_name, canonical_data_type, is_subscribable};
 use crate::filters::FilterSet;
+use crate::filters::predicate::{builtin_datatype_name, canonical_data_type, is_subscribable};
 use crate::opcua::attributes::read_node_attributes;
 use crate::opcua::browse::browse_properties;
 use crate::opcua::namespaces::NamespaceTable;
 use crate::opcua::value::{eu_label_from_data_value, range_from_data_value, read_data_values};
-use crate::scanner::{resolve_root, Engine, ScanConfig};
+use crate::scanner::{Engine, ScanConfig, resolve_root};
 
 /// A selected node ready for sampling.
 #[derive(Debug, Clone)]
@@ -140,6 +140,7 @@ async fn resolve_explicit(
         cached_path: Option<String>,
         config_id: Option<String>,
         mode: NodeMode,
+        key: Option<String>,
     }
     let mut parsed: Vec<Parsed> = Vec::with_capacity(nodes.len() + legacy_ids.len());
     for node in nodes {
@@ -150,6 +151,7 @@ async fn resolve_explicit(
             cached_path: node.path.clone().filter(|s| !s.is_empty()),
             config_id: Some(node.id.clone()),
             mode: node.mode,
+            key: node.key.clone(),
         });
     }
     for id in legacy_ids {
@@ -161,6 +163,7 @@ async fn resolve_explicit(
             cached_path: None,
             config_id: None,
             mode: NodeMode::Auto,
+            key: None,
         });
     }
 
@@ -218,6 +221,7 @@ async fn resolve_explicit(
             eu_range: None,
             source_endpoint: None,
             source_name: None,
+            key: p.key.clone(),
         };
         out.push(SelectedNode {
             path: browse_path.unwrap_or_else(|| name_or_id(&attr.display_name, &p.id)),
@@ -310,6 +314,7 @@ async fn resolve_filtered(
                     eu_range: None,
                     source_endpoint: None,
                     source_name: None,
+                    key: None,
                 };
                 nodes.push(SelectedNode {
                     name: measurement_name(&record),
@@ -427,11 +432,11 @@ async fn enrich_metadata(session: &Session, nodes: &mut Vec<SelectedNode>) -> Re
             continue;
         };
         folded.insert(node.node_id.clone());
-        if let Some((parent_path, _)) = node.path.rsplit_once('/') {
-            if let Some(&parent_idx) = path_index.get(parent_path) {
-                to_read.push(node.node_id.clone());
-                targets.push((parent_idx, kind));
-            }
+        if let Some((parent_path, _)) = node.path.rsplit_once('/')
+            && let Some(&parent_idx) = path_index.get(parent_path)
+        {
+            to_read.push(node.node_id.clone());
+            targets.push((parent_idx, kind));
         }
     }
 

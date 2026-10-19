@@ -43,7 +43,7 @@ cargo build --release
 # Binary at target/release/opcua-scan
 ```
 
-Requires a recent stable Rust toolchain (edition 2021, rustc ≥ 1.80).
+Requires a recent stable Rust toolchain (edition 2024, rustc ≥ 1.88).
 
 ---
 
@@ -139,6 +139,10 @@ minimal on huge address spaces.
 opcua-scan browse opc.tcp://localhost:4840 --tui
 ```
 
+A key legend under the tree always shows the keys that apply right now (browsing, filter input,
+the acquire prompt, `x cancel` while a job runs); press `?` for an overlay with every key and the
+meaning of the mark symbols (`↑`/`↓` scroll it on small terminals, `?`/`Esc`/`q` close it).
+
 Keys:
 
 | Key | Action |
@@ -153,7 +157,9 @@ Keys:
 | `s` | Validate subscription for the selected variable |
 | `e` | Export the loaded nodes (uses `--file`, or `opcua-scan-export.json`) |
 | `a` | Write an `acquire` config from the marked nodes |
+| `t` | Write the marked nodes as a tedge-dot point library (`--library`) |
 | `/` | Incremental path filter |
+| `?` | Show / hide all keys and mark symbols |
 | `g` / `G` | Jump to top / bottom |
 | `q` / `Esc` | Quit |
 
@@ -162,6 +168,79 @@ mode. Nodes marked with `space` (auto) follow the config's default mode —
 subscribe when the server supports monitoring the node, otherwise poll.
 
 The terminal is always restored on exit, even on panic.
+
+---
+
+## tedge-dot point libraries
+
+opcua-scan can produce a [tedge-dot](https://github.com/thin-edge/tedge-dot) OPC UA **point
+library** (a `[library]` table plus `[[point]]` entries) from the nodes it discovers, and connect
+with the settings of a device in a tedge-dot connector config instead of its own flags.
+
+```bash
+# Connect exactly like the gateway's connector does (endpoint, security, user/password file,
+# the gateway's application certificate). CLI flags still win.
+opcua-scan connect --tedge-dot-config /etc/tedge/plugins/ot/opcua.toml --device plc-7
+
+# Write every variable and method below Line1 as a library (merges into acme-line.toml)
+opcua-scan browse --tedge-dot-config opcua.toml --device plc-7 --depth unlimited \
+    --include "Factory/Line1/**" --type Variable,Method --output tedge-dot --file acme-line.toml
+
+# Pick nodes interactively: mark with space, press t to write/merge point-library.toml
+opcua-scan browse --tedge-dot-config opcua.toml --device plc-7 --tui --library acme-line.toml
+```
+
+- **Points:** `id` (unique snake_case from the browse path), `name`, `description`, `datatype`
+  (Double → `float64`, DateTime/LocalizedText/Guid/... → `string`, ByteString → `bytes`, ...),
+  `access` (`read_write`/`write` from AccessLevel ∧ UserAccessLevel), `subscribe = false` for
+  readable nodes that are not subscribable, and `address = { node_id = ... }`.
+- **Custom datatypes** are read from the server (`DataTypeDefinition`, `HasSubtype`):
+  - a **structure** variable becomes one read-only point per mappable leaf field,
+    `address = { node_id = ..., field = "Motor.Current" }`, nested structures included;
+  - an **enumeration** becomes an `int32` point with `map.cases` from its values to its names
+    (`as = "string"` for codes the definition does not list);
+  - a **derived type** (e.g. a `Percent` subtype of Double) maps like its base type.
+- **Methods** become `access = "call_method"` points with
+  `address = { object_id, method_id, inputs = [...] }`, the inputs read from `InputArguments`.
+  Include them with `--type Variable,Method` (or no `--type`).
+- **Skipped:** arrays, array fields, abstract/unsupported types, inaccessible variables,
+  non-executable methods and methods with structure or array arguments; a new library lists
+  them in its header comment. An empty result is an error and writes nothing.
+- **Namespaces:** `[library] namespaces` records the server's namespace table, so tedge-dot
+  translates the ids if a server numbers its namespaces differently.
+- **Merging:** an existing library is edited in place: comments and hand-edited points are kept,
+  new nodes are appended (in the library's namespace numbering). In the TUI, the library's points
+  are pre-marked and a point is removed when its node is shown in the tree and unmarked.
+- `[library] type` comes from `--library-type`, else the `--tedge-dot-config` device's `type`.
+- From the connector config only the connection is used, with tedge-dot's rules:
+  `allow_deprecated_security` unlocks `Basic128Rsa15`/`Basic256`, and `allow_plaintext_password`
+  is required for an unprotected password. Server-certificate trust stays in opcua-scan's own
+  PKI (`--pki-dir`).
+
+### Acquire a tedge-dot device's points
+
+The same point list drives `opcua-scan acquire`, so there is one list to maintain:
+
+```bash
+# Read the device's points (points_from libraries + inline points) for 30 s
+opcua-scan acquire --tedge-dot-config /etc/tedge/plugins/ot/opcua.toml --device plc-7 --duration 30s
+
+# Add acquire-only settings: history, other intervals, CSV/NDJSON files
+opcua-scan acquire --tedge-dot-config opcua.toml --device plc-7 --config extras.toml
+```
+
+- Libraries are found like tedge-dot finds them (`[connector] point_library_path`, else
+  `TEDGE_DOT_POINT_LIBRARY_PATH`, else `/etc/tedge/plugins/ot/points.d` and
+  `/usr/share/tedge-dot/points.d`, file `<dir>/opcua/<name>.toml`); inline points override
+  library points with the same `id`.
+- Node ids are translated through their namespace table (library, else device) to the server's
+  current index; a namespace the server does not list stops the run.
+- `subscribe = false` points are polled, the rest subscribe when they can. Method, write-only,
+  disabled and `field`/`index` points are skipped with a warning. Samples are keyed by point `id`.
+- `extras.toml` may only contain `[acquire]`, `[output]` and `[[task]]`. Without tasks, a poll task
+  uses the device's (else connector's) `poll_interval` (default 2s) and a subscribe task its
+  `sampling_interval`. Per-point intervals are not applied. Nothing is written to the tedge-dot
+  files.
 
 ---
 
@@ -261,8 +340,9 @@ Globs use `/` as the path separator and support `*` (within a segment) and `**`
 | `--user <USER>` | Username for user/password auth. |
 | `--password <PASSWORD\|env:VAR>` | Password; use `env:VAR` to read from an env var, or omit to be prompted securely. Secrets are never logged. |
 | `--cert <FILE>` / `--key <FILE>` | Client certificate and private key. |
-| `--security-policy <POLICY>` | `None`, `Basic256Sha256`, `Aes128Sha256RsaOaep`, `Aes256Sha256RsaPss`. |
-| `--security-mode <MODE>` | `None`, `Sign`, `SignAndEncrypt`. |
+| `--security-policy <POLICY>` | `None`, `Basic128Rsa15`, `Basic256`, `Basic256Sha256`, `Aes128Sha256RsaOaep`, `Aes256Sha256RsaPss` (any case; tedge-dot spellings such as `Aes128_Sha256_RsaOaep` and the policy URIs work too). |
+| `--security-mode <MODE>` | `None`, `Sign`, `SignAndEncrypt`. Default: `SignAndEncrypt` with a security policy, else `None`. |
+| `--allow-deprecated-security` | Required for the deprecated SHA-1 policies `Basic128Rsa15` and `Basic256`. |
 | `--trust-server` | Auto-trust the server certificate (**insecure**; lab use only). |
 | `--pki-dir <DIR>` | Client PKI directory (own cert, key, trusted certs). |
 | `--timeout <DURATION>` | Per-request timeout (default `10s`). |
@@ -277,6 +357,12 @@ opcua-scan browse opc.tcp://10.0.0.10:4840 \
   --security-policy Basic256Sha256 --security-mode SignAndEncrypt \
   --depth 3
 ```
+
+Every policy async-opcua implements is supported, with anonymous, username/password and X.509
+user identities. ECC policies are not available (neither async-opcua nor tedge-dot implements
+them). A password that would travel unprotected (a `None` channel, or a signed-only channel
+whose username token policy names `None`) is sent with a warning; with `--tedge-dot-config` it is
+refused unless the config sets `allow_plaintext_password = true`, as the connector does.
 
 ---
 
@@ -320,11 +406,14 @@ opcua-scan browse --profile plant --subscribable --output csv --file plant.csv
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success |
+| `0` | Success (also an `acquire` run that ends because its `--duration` elapsed) |
 | `1` | General failure |
 | `2` | Invalid usage / arguments |
 | `3` | Connection failure |
-| `4` | Cancelled (Ctrl+C) |
+| `4` | Cancelled (Ctrl+C), also during an `acquire --duration` run |
+
+Acquired samples always carry a `time`: the source timestamp, else the server timestamp, else
+the time opcua-scan received the value (some servers send neither).
 
 ---
 

@@ -41,7 +41,7 @@ jobs:
         include:
           # Validate the declared MSRV on Linux.
           - os: ubuntu-latest
-            rust: "1.80"
+            rust: "1.88"
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust ${{ matrix.rust }}

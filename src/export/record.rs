@@ -46,4 +46,8 @@ pub struct NodeRecord {
     /// Description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The node a Method was browsed from (the object it is called on).
+    /// Only set for Methods.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_node_id: Option<String>,
 }

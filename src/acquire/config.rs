@@ -16,7 +16,7 @@ use crate::cli::{
 use crate::error::{Result, ScanError};
 
 /// A fully parsed acquisition configuration (one TOML file).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcquireConfig {
     /// Connection / security settings.
@@ -87,6 +87,29 @@ impl AcquireConfig {
         let config: AcquireConfig = toml::from_str(text).map_err(|e| e.to_string())?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// The acquire-only settings that may accompany `--tedge-dot-config`:
+    /// `[acquire]`, `[output]` and `[[task]]`. Connection and selection come
+    /// from the tedge-dot config, so any other table is an error.
+    pub fn extras_from_file(path: &Path) -> Result<Self> {
+        let config_err = |reason: String| ScanError::Config {
+            path: path.to_path_buf(),
+            reason,
+        };
+        let text = std::fs::read_to_string(path).map_err(|e| config_err(e.to_string()))?;
+        let table: toml::Table = text
+            .parse()
+            .map_err(|e: toml::de::Error| config_err(e.to_string()))?;
+        if let Some(key) = table
+            .keys()
+            .find(|k| !matches!(k.as_str(), "acquire" | "output" | "task"))
+        {
+            return Err(config_err(format!(
+                "[{key}] is not allowed with --tedge-dot-config; only [acquire], [output] and [[task]] are"
+            )));
+        }
+        toml::from_str(&text).map_err(|e: toml::de::Error| config_err(e.to_string()))
     }
 
     fn validate(&self) -> std::result::Result<(), String> {
@@ -219,10 +242,15 @@ pub struct ConnectionConfig {
     pub cert: Option<PathBuf>,
     /// Client private key (PEM).
     pub key: Option<PathBuf>,
-    /// Security policy: `None`, `Basic256Sha256`, `Aes128Sha256RsaOaep`, `Aes256Sha256RsaPss`.
+    /// Security policy: `None`, `Basic128Rsa15`, `Basic256`, `Basic256Sha256`,
+    /// `Aes128Sha256RsaOaep`, `Aes256Sha256RsaPss` (also tedge-dot names and URIs).
     pub security_policy: Option<String>,
-    /// Security mode: `None`, `Sign`, `SignAndEncrypt`.
+    /// Security mode: `None`, `Sign`, `SignAndEncrypt` (default: SignAndEncrypt
+    /// with a security policy).
     pub security_mode: Option<String>,
+    /// Allow the deprecated policies `Basic128Rsa15` and `Basic256`.
+    #[serde(default)]
+    pub allow_deprecated_security: bool,
     /// Automatically trust the server certificate (insecure).
     #[serde(default)]
     pub trust_server: bool,
@@ -238,7 +266,7 @@ pub struct ConnectionConfig {
 }
 
 impl ConnectionConfig {
-    fn to_args(&self) -> Result<ConnectionArgs> {
+    pub fn to_args(&self) -> Result<ConnectionArgs> {
         Ok(ConnectionArgs {
             endpoint: self.endpoint.clone(),
             user: self.user.clone(),
@@ -247,11 +275,15 @@ impl ConnectionConfig {
             key: self.key.clone(),
             security_policy: parse_security_policy(self.security_policy.as_deref())?,
             security_mode: parse_security_mode(self.security_mode.as_deref())?,
+            allow_deprecated_security: self.allow_deprecated_security,
             trust_server: self.trust_server,
             pki_dir: self.pki_dir.clone(),
             timeout: self.timeout.unwrap_or_else(|| Duration::from_secs(10)),
             retry: self.retry.unwrap_or(3),
             cache: self.cache.clone(),
+            tedge_dot_config: None,
+            device: None,
+            extras: Default::default(),
         })
     }
 
@@ -284,9 +316,10 @@ impl ConnectionConfig {
         if args.security_policy == SecurityPolicyArg::None {
             args.security_policy = parse_security_policy(self.security_policy.as_deref())?;
         }
-        if args.security_mode == SecurityModeArg::None {
+        if args.security_mode.is_none() {
             args.security_mode = parse_security_mode(self.security_mode.as_deref())?;
         }
+        args.allow_deprecated_security |= self.allow_deprecated_security;
         if !args.trust_server {
             args.trust_server = self.trust_server;
         }
@@ -395,6 +428,10 @@ pub struct NodeSelector {
     /// `auto`). Routes the node to the matching task at runtime.
     #[serde(default)]
     pub mode: NodeMode,
+    /// Output key of this node's samples (a tedge-dot point id). Not settable
+    /// from an acquire file; set when points come from `--tedge-dot-config`.
+    #[serde(skip)]
+    pub key: Option<String>,
 }
 
 /// `[output]` table.
@@ -511,31 +548,18 @@ impl From<ScanStrategy> for Strategy {
 fn parse_security_policy(s: Option<&str>) -> Result<SecurityPolicyArg> {
     match s.map(str::trim) {
         None | Some("") => Ok(SecurityPolicyArg::None),
-        Some(v) if v.eq_ignore_ascii_case("none") => Ok(SecurityPolicyArg::None),
-        Some(v) if v.eq_ignore_ascii_case("Basic256Sha256") => {
-            Ok(SecurityPolicyArg::Basic256Sha256)
-        }
-        Some(v) if v.eq_ignore_ascii_case("Aes128Sha256RsaOaep") => {
-            Ok(SecurityPolicyArg::Aes128Sha256RsaOaep)
-        }
-        Some(v) if v.eq_ignore_ascii_case("Aes256Sha256RsaPss") => {
-            Ok(SecurityPolicyArg::Aes256Sha256RsaPss)
-        }
-        Some(v) => Err(ScanError::InvalidArgument(format!(
-            "invalid security_policy '{v}'"
-        ))),
+        Some(v) => SecurityPolicyArg::parse(v)
+            .ok_or_else(|| ScanError::InvalidArgument(format!("invalid security_policy '{v}'"))),
     }
 }
 
-fn parse_security_mode(s: Option<&str>) -> Result<SecurityModeArg> {
+/// An absent mode stays absent: the policy's default applies at connect.
+fn parse_security_mode(s: Option<&str>) -> Result<Option<SecurityModeArg>> {
     match s.map(str::trim) {
-        None | Some("") => Ok(SecurityModeArg::None),
-        Some(v) if v.eq_ignore_ascii_case("none") => Ok(SecurityModeArg::None),
-        Some(v) if v.eq_ignore_ascii_case("sign") => Ok(SecurityModeArg::Sign),
-        Some(v) if v.eq_ignore_ascii_case("SignAndEncrypt") => Ok(SecurityModeArg::SignAndEncrypt),
-        Some(v) => Err(ScanError::InvalidArgument(format!(
-            "invalid security_mode '{v}'"
-        ))),
+        None | Some("") => Ok(None),
+        Some(v) => SecurityModeArg::parse(v)
+            .map(Some)
+            .ok_or_else(|| ScanError::InvalidArgument(format!("invalid security_mode '{v}'"))),
     }
 }
 
@@ -553,7 +577,7 @@ fn parse_node_class(s: &str) -> Result<NodeClassArg> {
         _ => {
             return Err(ScanError::InvalidArgument(format!(
                 "invalid node class '{v}'"
-            )))
+            )));
         }
     };
     Ok(class)
@@ -584,6 +608,48 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
+    fn extras(text: &str) -> Result<AcquireConfig> {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        AcquireConfig::extras_from_file(file.path())
+    }
+
+    #[test]
+    fn extras_file_takes_acquire_output_and_tasks() {
+        let config = extras(
+            "[acquire]\npoll_only = true\n[output]\nformat = \"csv\"\n[[task]]\nmode = \"poll\"\ninterval = \"2s\"\n",
+        )
+        .unwrap();
+        assert!(config.acquire.poll_only);
+        assert_eq!(config.tasks.len(), 1);
+        // No tasks is fine: the tedge-dot defaults fill them in.
+        assert!(
+            extras("[output]\nformat = \"ndjson\"\n")
+                .unwrap()
+                .tasks
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn extras_file_refuses_connection_and_selection() {
+        for table in ["connection", "selection"] {
+            let err = extras(&format!("[{table}]\n")).unwrap_err().to_string();
+            assert!(err.contains(&format!("[{table}] is not allowed")), "{err}");
+        }
+    }
+
+    #[test]
+    fn node_key_cannot_be_set_from_a_file() {
+        let err = AcquireConfig::from_toml(
+            "[[selection.node]]\nid = \"i=2258\"\nkey = \"x\"\n[[task]]\nmode = \"poll\"\ninterval = \"1s\"\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("key"), "{err}");
+    }
+
     use super::*;
 
     #[test]

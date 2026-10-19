@@ -19,13 +19,18 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use opcua::crypto::SecurityPolicy;
-use opcua::server::address_space::VariableBuilder;
-use opcua::server::diagnostics::NamespaceMetadata;
-use opcua::server::node_manager::memory::{simple_node_manager, SimpleNodeManager};
-use opcua::server::{
-    ServerBuilder, ServerEndpoint, ServerHandle, ServerUserToken, ANONYMOUS_USER_TOKEN_ID,
+use opcua::server::address_space::{
+    DataTypeBuilder, MethodBuilder, ObjectBuilder, VariableBuilder,
 };
-use opcua::types::{DataTypeId, MessageSecurityMode, NodeId};
+use opcua::server::diagnostics::NamespaceMetadata;
+use opcua::server::node_manager::memory::{SimpleNodeManager, simple_node_manager};
+use opcua::server::{
+    ANONYMOUS_USER_TOKEN_ID, ServerBuilder, ServerEndpoint, ServerHandle, ServerUserToken,
+};
+use opcua::types::{
+    Argument, DataTypeDefinition, DataTypeId, EnumDefinition, EnumField, MessageSecurityMode,
+    NodeId, ObjectTypeId, StructureDefinition, StructureField, StructureType,
+};
 
 /// Namespace URI used by the test address space.
 pub const TEST_NS: &str = "urn:opcua-scan-test";
@@ -36,6 +41,16 @@ pub const TEST_USER_TOKEN_ID: &str = "opcua-scan-test-user";
 pub const TEST_USER: &str = "operator";
 /// Password accepted by the in-process server.
 pub const TEST_PASSWORD: &str = "s3cr3t-pass";
+
+/// The secured policies the test server offers (CLI name, policy), each with
+/// Sign and SignAndEncrypt endpoints.
+pub const SECURE_POLICIES: &[(&str, SecurityPolicy)] = &[
+    ("Basic128Rsa15", SecurityPolicy::Basic128Rsa15),
+    ("Basic256", SecurityPolicy::Basic256),
+    ("Basic256Sha256", SecurityPolicy::Basic256Sha256),
+    ("Aes128Sha256RsaOaep", SecurityPolicy::Aes128Sha256RsaOaep),
+    ("Aes256Sha256RsaPss", SecurityPolicy::Aes256Sha256RsaPss),
+];
 
 /// Leaf variables created under `Motor`, with their browse names.
 pub const MOTOR_VARIABLES: &[&str] = &[
@@ -95,7 +110,20 @@ async fn run_server(port: u16) {
         ANONYMOUS_USER_TOKEN_ID.to_string(),
         TEST_USER_TOKEN_ID.to_string(),
     ];
-    let (server, handle) = ServerBuilder::new()
+    let mut builder = ServerBuilder::new();
+    // Every secured policy async-opcua implements, signed and encrypted.
+    for (name, policy) in SECURE_POLICIES {
+        for (suffix, mode) in [
+            ("sign", MessageSecurityMode::Sign),
+            ("signencrypt", MessageSecurityMode::SignAndEncrypt),
+        ] {
+            builder = builder.add_endpoint(
+                format!("{}_{suffix}", name.to_ascii_lowercase()),
+                ServerEndpoint::new("/", *policy, mode, &tokens),
+            );
+        }
+    }
+    let (server, handle) = builder
         .application_name("opcua-scan-test-server")
         .application_uri("urn:opcua-scan-test-server")
         .host("127.0.0.1")
@@ -106,24 +134,6 @@ async fn run_server(port: u16) {
             ServerUserToken::user_pass(TEST_USER, TEST_PASSWORD),
         )
         .add_endpoint("none", ServerEndpoint::new_none("/", &tokens))
-        .add_endpoint(
-            "basic256sha256_sign",
-            ServerEndpoint::new(
-                "/",
-                SecurityPolicy::Basic256Sha256,
-                MessageSecurityMode::Sign,
-                &tokens,
-            ),
-        )
-        .add_endpoint(
-            "basic256sha256_signencrypt",
-            ServerEndpoint::new(
-                "/",
-                SecurityPolicy::Basic256Sha256,
-                MessageSecurityMode::SignAndEncrypt,
-                &tokens,
-            ),
-        )
         .with_node_manager(simple_node_manager(
             NamespaceMetadata {
                 namespace_uri: TEST_NS.to_owned(),
@@ -216,6 +226,150 @@ fn populate(handle: &ServerHandle) {
     .history_readable()
     .organized_by(&motor)
     .insert(&mut *a);
+
+    populate_plant(&mut a, ns);
+}
+
+/// `Plant`: custom datatypes and methods, outside `Factory` so the factory
+/// counts stay stable.
+///
+/// - `Plant/Pump1/Status`: `PumpStatus` structure { Speed: Double, Motor:
+///   `MotorData` { Current: Float }, State: `PumpState`, History: Double[],
+///   Blob: XmlElement }
+/// - `Plant/Pump1/State`: `PumpState` enumeration { Stopped = 0, Running = 1,
+///   Fault = 2 }, writable
+/// - `Plant/Pump1/Level`: `Percent`, a subtype of Double without a definition
+/// - `Plant/Machine`: methods `Multiply(a: Int32, b: Int32)`, `Reset()`,
+///   `Locked()` (not executable), `Configure(cfg: MotorData)`
+fn populate_plant(a: &mut opcua::server::address_space::AddressSpace, ns: u16) {
+    let structure_field = |name: &str, data_type: NodeId, value_rank: i32| StructureField {
+        name: name.into(),
+        description: Default::default(),
+        data_type,
+        value_rank,
+        array_dimensions: None,
+        max_string_length: 0,
+        is_optional: false,
+    };
+    let structure = |fields: Vec<StructureField>| {
+        DataTypeDefinition::Structure(StructureDefinition {
+            default_encoding_id: NodeId::null(),
+            base_data_type: DataTypeId::Structure.into(),
+            structure_type: StructureType::Structure,
+            fields: Some(fields),
+        })
+    };
+
+    let motor_data = NodeId::new(ns, "MotorData");
+    DataTypeBuilder::new(&motor_data, "MotorData", "MotorData")
+        .subtype_of(DataTypeId::Structure)
+        .data_type_definition(structure(vec![structure_field(
+            "Current",
+            DataTypeId::Float.into(),
+            -1,
+        )]))
+        .insert(a);
+    let pump_state = NodeId::new(ns, "PumpState");
+    DataTypeBuilder::new(&pump_state, "PumpState", "PumpState")
+        .subtype_of(DataTypeId::Enumeration)
+        .data_type_definition(DataTypeDefinition::Enum(EnumDefinition {
+            fields: Some(
+                ["Stopped", "Running", "Fault"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| EnumField {
+                        value: i as i64,
+                        display_name: (*name).into(),
+                        description: Default::default(),
+                        name: (*name).into(),
+                    })
+                    .collect(),
+            ),
+        }))
+        .insert(a);
+    let pump_status = NodeId::new(ns, "PumpStatus");
+    DataTypeBuilder::new(&pump_status, "PumpStatus", "PumpStatus")
+        .subtype_of(DataTypeId::Structure)
+        .data_type_definition(structure(vec![
+            structure_field("Speed", DataTypeId::Double.into(), -1),
+            structure_field("Motor", motor_data.clone(), -1),
+            structure_field("State", pump_state.clone(), -1),
+            structure_field("History", DataTypeId::Double.into(), 1),
+            structure_field("Blob", DataTypeId::XmlElement.into(), -1),
+        ]))
+        .insert(a);
+    let percent = NodeId::new(ns, "Percent");
+    DataTypeBuilder::new(&percent, "Percent", "Percent")
+        .subtype_of(DataTypeId::Double)
+        .insert(a);
+
+    let plant = NodeId::new(ns, "Plant");
+    let _ = a.add_folder(&plant, "Plant", "Plant", &NodeId::objects_folder_id());
+    let pump = NodeId::new(ns, "Pump1");
+    let _ = a.add_folder(&pump, "Pump1", "Pump1", &plant);
+    VariableBuilder::new(&NodeId::new(ns, "Pump1.Status"), "Status", "Status")
+        .data_type(pump_status)
+        .organized_by(&pump)
+        .insert(a);
+    VariableBuilder::new(&NodeId::new(ns, "Pump1.State"), "State", "State")
+        .data_type(pump_state)
+        .value(1i32)
+        .writable()
+        .organized_by(&pump)
+        .insert(a);
+    VariableBuilder::new(&NodeId::new(ns, "Pump1.Level"), "Level", "Level")
+        .data_type(percent)
+        .value(42.0f64)
+        .organized_by(&pump)
+        .insert(a);
+
+    let machine = NodeId::new(ns, "Machine");
+    ObjectBuilder::new(&machine, "Machine", "Machine")
+        .organized_by(&plant)
+        .has_type_definition(ObjectTypeId::BaseObjectType)
+        .insert(a);
+    let argument = |name: &str, data_type: NodeId| Argument {
+        name: name.into(),
+        data_type,
+        value_rank: -1,
+        array_dimensions: None,
+        description: Default::default(),
+    };
+    let multiply = NodeId::new(ns, "Machine.Multiply");
+    MethodBuilder::new(&multiply, "Multiply", "Multiply")
+        .component_of(machine.clone())
+        .executable(true)
+        .user_executable(true)
+        .input_args(
+            a,
+            &NodeId::new(ns, "Machine.Multiply.InputArguments"),
+            &[
+                argument("a", DataTypeId::Int32.into()),
+                argument("b", DataTypeId::Int32.into()),
+            ],
+        )
+        .insert(a);
+    MethodBuilder::new(&NodeId::new(ns, "Machine.Reset"), "Reset", "Reset")
+        .component_of(machine.clone())
+        .executable(true)
+        .user_executable(true)
+        .insert(a);
+    MethodBuilder::new(&NodeId::new(ns, "Machine.Locked"), "Locked", "Locked")
+        .component_of(machine.clone())
+        .executable(false)
+        .user_executable(false)
+        .insert(a);
+    let configure = NodeId::new(ns, "Machine.Configure");
+    MethodBuilder::new(&configure, "Configure", "Configure")
+        .component_of(machine)
+        .executable(true)
+        .user_executable(true)
+        .input_args(
+            a,
+            &NodeId::new(ns, "Machine.Configure.InputArguments"),
+            &[argument("cfg", motor_data)],
+        )
+        .insert(a);
 }
 
 /// Grab an unused TCP port by binding to port 0 and reading the assigned port.
@@ -226,7 +380,8 @@ fn free_port() -> u16 {
 
 /// Block until the server is accepting TCP connections (or time out).
 fn wait_until_listening(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Generous: server start-up includes key generation, slow on shared CI runners.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
             // Give the OPC UA stack a brief moment after the socket is up.
